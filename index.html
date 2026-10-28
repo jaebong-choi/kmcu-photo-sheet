@@ -149,11 +149,7 @@ details summary{cursor:pointer;font-size:13px;color:var(--muted)}
 
     <section class="step">
       <h2><b>2</b>물품 이름 채우기</h2>
-      <p class="note" style="margin-top:0">각 사진 아래 칸에 바로 적어도 되고, 명세서 품목을 붙여 넣고 AI로 빈 칸을 채울 수도 있습니다.</p>
-      <label class="f" for="invoice">명세서 품목 (선택, 복사해서 붙여 넣기)</label>
-      <textarea id="invoice" placeholder="예) 리얼타이 코코넛밀크, 400ml, 2개&#10;하선정 국내산 다진마늘, 150g, 1개"></textarea>
-      <button class="btn wide" id="aiBtn" style="margin-top:8px" disabled>빈 칸 이름 AI로 채우기</button>
-      <div class="status" id="aiStatus"></div>
+      <p class="note" style="margin-top:0">각 사진 아래 칸에 물품 이름을 적어 주세요. Enter를 누르면 다음 칸으로 넘어가고, 앞 사진과 같은 물품이면 「위와 같음」을 누르면 됩니다.</p>
       <div class="count" id="count"></div>
     </section>
 
@@ -339,7 +335,6 @@ function move(from, to){
 function updateCount(){
   const empty = items.filter(i => !i.name.trim()).length;
   $('count').innerHTML = items.length ? `사진 ${items.length}장 · ${Math.ceil(items.length/PER_PAGE)}쪽` + (empty ? ` · 이름 빈 칸 <em>${empty}개</em>` : ' · 이름 모두 입력됨') : '';
-  $('aiBtn').disabled = !aiReady || !empty;
 }
 $('groupBtn').onclick = () => {
   const order = new Map(); items.forEach((it,i) => { const k = it.name.trim() || ('\u0000'+it.id); if (!order.has(k)) order.set(k,i); });
@@ -348,57 +343,6 @@ $('groupBtn').onclick = () => {
 };
 $('clearBtn').onclick = () => { if (!confirm('넣은 사진과 이름을 모두 지울까요?')) return; items.forEach(i=>URL.revokeObjectURL(i.url)); items=[]; setStatus('loadStatus',''); render(); };
 ['t1','t2'].forEach(id => $(id).oninput = () => sheets.querySelectorAll('.title').forEach(t => { t.textContent=''; t.append($('t1').value, document.createElement('br'), $('t2').value); }));
-
-/* ---------- AI naming ---------- */
-let sample = null, aiReady = false, maxImgs = 10;
-(async () => {
-  if (!window.claude?.use) { $('aiBtn').title='Claude 안에서 열었을 때만 쓸 수 있습니다.'; return; }
-  sample = await window.claude.use('sample');
-  if (!sample) return;
-  const lim = await sample.limits().catch(()=>null);
-  if (!lim?.images) return;
-  maxImgs = Math.max(1, Math.min(lim.images.maxCount || 10, 10));
-  aiReady = true; updateCount();
-})();
-async function smallBlob(it){
-  const img = await loadImg(it.url);
-  const s = Math.min(1, 640/Math.max(it.w,it.h));
-  const c = document.createElement('canvas'); c.width=Math.round(it.w*s); c.height=Math.round(it.h*s);
-  c.getContext('2d').drawImage(img,0,0,c.width,c.height);
-  return new Promise(r => c.toBlob(r,'image/jpeg',0.8));
-}
-$('aiBtn').onclick = async () => {
-  const targets = items.filter(i => !i.name.trim());
-  if (!targets.length) return;
-  const invoice = $('invoice').value.trim();
-  const named = [...new Set(items.filter(i=>i.name.trim()).map(i=>i.name.trim()))];
-  $('aiBtn').disabled = true;
-  let filled = 0;
-  try{
-    for (let s=0; s<targets.length; s+=maxImgs){
-      const batch = targets.slice(s, s+maxImgs);
-      setStatus('aiStatus', `사진 보는 중… ${Math.min(s+batch.length,targets.length)}/${targets.length}`);
-      const blobs = await Promise.all(batch.map(smallBlob));
-      const prompt =
-`물품 검수 서류에 넣을 사진 ${batch.length}장을 순서대로 보냅니다. 각 사진 속 물품의 이름을 한국어로 짧게 지어 주세요.
-규칙:
-- 이름은 짧게(15자 이내). 용량·개수가 보이면 괄호로: 예) 양파(1kg), 코코넛밀크(400ml×2), 종이접시
-- 브랜드명은 빼고 물품 종류 위주로 쓰되, 외국 식재료처럼 종류만으로 알기 어려우면 원래 이름을 괄호로 덧붙여도 됩니다. 예) 새우 페이스트(Terasi)
-- 같은 물품을 여러 장 찍은 사진에는 같은 이름을 쓰세요.
-- 확실하지 않으면 보이는 그대로 무난한 이름을 쓰세요(예: 생고기).
-${invoice ? `\n아래 거래명세서 품목 중에서 사진과 맞는 것을 찾아, 그 품목명을 위 규칙대로 줄여서 쓰세요. 명세서에 없으면 사진을 보고 지으세요.\n[명세서]\n${invoice}\n` : ''}${named.length ? `\n이미 다른 사진에 붙인 이름(같은 물품이면 똑같이 쓰기): ${named.join(', ')}\n` : ''}
-답은 JSON 배열 하나만. 사진 순서대로 문자열 ${batch.length}개. 다른 말은 쓰지 마세요.`;
-      const arr = await sample.json(prompt, {images: blobs});
-      if (Array.isArray(arr)) batch.forEach((it,i) => { const v = typeof arr[i]==='string' ? arr[i].trim() : ''; if (v && !it.name.trim()){ it.name = v; filled++; if (!named.includes(v)) named.push(v); } });
-      render();
-    }
-    setStatus('aiStatus', `${filled}칸을 채웠습니다. 사진과 맞는지 한 번 훑어보고 고쳐 주세요.`, 'ok');
-  }catch(e){
-    const msg = {not_granted:'AI 사용을 허용하지 않아 채우지 못했습니다. 이름은 직접 적어 주세요.', rate_limited:'요청이 많습니다. 잠시 뒤 다시 눌러 주세요.', cancelled:'중단했습니다.'}[e?.code] || 'AI가 이름을 채우지 못했습니다. 잠시 뒤 다시 시도하거나 직접 적어 주세요.';
-    setStatus('aiStatus', (filled?`${filled}칸까지 채웠습니다. `:'') + msg, 'warn');
-    if (e?.code==='not_granted') { aiReady=false; }
-  }finally{ updateCount(); }
-};
 
 /* ---------- template ---------- */
 $('tplFile').onchange = async e => {
