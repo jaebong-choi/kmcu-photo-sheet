@@ -136,15 +136,17 @@ details summary{cursor:pointer;font-size:13px;color:var(--muted)}
       <h2><b>1</b>사진 넣기</h2>
       <div class="drop" id="drop" tabindex="0" role="button" aria-label="사진 또는 zip 파일 선택">
         <strong>사진이나 zip 파일을 여기에 끌어 놓기</strong>
-        또는 눌러서 선택 (JPG·PNG, 카톡 묶음 zip 가능)
+        또는 눌러서 선택 (JPG·PNG, 카톡 묶음 zip, 전에 만든 Word 파일)
       </div>
-      <input type="file" id="file" accept="image/jpeg,image/png,image/webp,.zip" multiple hidden>
+      <input type="file" id="file" accept="image/jpeg,image/png,image/webp,.zip,.docx" multiple hidden>
+      <input type="file" id="docxFile" accept=".docx" hidden>
       <div class="status" id="loadStatus"></div>
+      <button class="btn wide" id="docxBtn" style="margin-top:10px">전에 만든 Word 파일 불러와 이어서 넣기</button>
       <div class="row">
         <button class="btn" id="groupBtn" disabled>같은 이름끼리 모으기</button>
         <button class="btn" id="clearBtn" disabled>모두 지우기</button>
       </div>
-      <p class="note">사진은 파일명 순서로 들어갑니다. 칸을 끌어서 순서를 바꿀 수 있어요.</p>
+      <p class="note">사진은 파일명 순서로 들어갑니다. Word 파일을 불러오면 그 안의 사진·이름이 먼저 깔리고, 새로 넣는 사진은 뒤에 붙어요. 칸을 끌어서 순서를 바꿀 수 있어요.</p>
     </section>
 
     <section class="step">
@@ -218,7 +220,9 @@ async function addFiles(fileList){
   const files = [...fileList];
   const imgs = [];
   let skipped = 0;
+  let docxMsg = '';
   for (const f of files){
+    if (/\.docx$/i.test(f.name)){ docxMsg = await importDocx(f); continue; }
     if (/\.zip$/i.test(f.name)){
       try{
         const z = await JSZip.loadAsync(f);
@@ -232,6 +236,7 @@ async function addFiles(fileList){
       imgs.push({name:f.name, get: async () => f});
     } else skipped++;
   }
+  if (docxMsg && !imgs.length && !skipped){ render(); return; }
   imgs.sort((a,b) => collator.compare(a.name,b.name));
   let done = 0, ok = 0;
   for (const im of imgs){
@@ -244,7 +249,7 @@ async function addFiles(fileList){
     }catch(e){ console.warn("img fail", im.name, e && (e.message||e)); skipped++; }
     done++;
   }
-  let msg = `사진 ${ok}장을 넣었습니다.`;
+  let msg = (docxMsg ? docxMsg + ' ' : '') + `사진 ${ok}장을 넣었습니다.`;
   if (skipped) msg += ` 읽지 못한 파일 ${skipped}개는 건너뛰었습니다. 그 파일만 다시 넣어 보고, HEIC 사진이면 JPG로 바꿔서 넣어 주세요.`;
   setStatus('loadStatus', ok ? msg : '넣을 수 있는 사진이 없었습니다. JPG·PNG 파일이나 사진이 든 zip을 넣어 주세요.', ok && !skipped ? 'ok' : 'warn');
   render();
@@ -258,6 +263,73 @@ fileIn.onchange = () => { addFiles(fileIn.files); fileIn.value=''; };
 drop.addEventListener('drop', e => { e.preventDefault(); addFiles(e.dataTransfer.files); });
 document.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); });
 document.addEventListener('drop', e => { if (e.dataTransfer.types.includes('Files') && !drop.contains(e.target)){ e.preventDefault(); addFiles(e.dataTransfer.files); } });
+
+
+/* ---------- 전에 만든 Word 파일 불러오기 ---------- */
+const unxml = t => t.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
+const textOf = x => unxml((x.match(/<w:t(?:\s[^>]*)?>[^<]*<\/w:t>/g) || []).map(t => t.replace(/<[^>]+>/g,'')).join(''));
+const cellsOf = r => r.match(/<w:tc\b[\s\S]*?<\/w:tc>/g) || [];
+async function importDocx(f){
+  setStatus('loadStatus', `${f.name} 읽는 중…`);
+  try{
+    const z = await JSZip.loadAsync(f);
+    const d = await z.file('word/document.xml')?.async('string');
+    if (!d) throw new Error('nodoc');
+    const relX = await z.file('word/_rels/document.xml.rels')?.async('string') || '';
+    const rel = {};
+    for (const m of relX.matchAll(/<Relationship\b[^>]*>/g)){
+      const id = m[0].match(/\bId="([^"]+)"/)?.[1], t = m[0].match(/\bTarget="([^"]+)"/)?.[1];
+      if (id && t) rel[id] = t;
+    }
+    const tbls = d.match(/<w:tbl>[\s\S]*?<\/w:tbl>/g) || [];
+    // 제목: 첫 머리 표의 가운데 칸
+    const mid = tbls[0] && cellsOf(tbls[0])[1];
+    const titleLines = mid ? mid.split(/<w:br\/>|<\/w:p>/).map(textOf).map(x => x.trim()).filter(Boolean) : [];
+    // 사진 표: 사진 줄 다음에 이름 줄 (줄이 하나뿐인 머리 표는 건너뜀)
+    const found = [];
+    for (const t of tbls){
+      const rows = t.match(/<w:tr\b[\s\S]*?<\/w:tr>/g) || [];
+      if (rows.length < 2) continue;
+      for (let r=0; r<rows.length; r++){
+        if (!/r:embed=/.test(rows[r])) continue;
+        const pc = cellsOf(rows[r]), lc = rows[r+1] && !/r:embed=/.test(rows[r+1]) ? cellsOf(rows[r+1]) : [];
+        pc.forEach((c, k) => {
+          const id = c.match(/r:embed="([^"]+)"/)?.[1], target = id && rel[id];
+          const file = target && z.file('word/' + target.replace(/^\/?word\//,''));
+          if (file) found.push({file, target, name: lc[k] ? textOf(lc[k]).trim() : ''});
+        });
+        if (lc.length) r++;
+      }
+    }
+    if (!found.length) throw new Error('nophoto');
+    const got = [];
+    let bad = 0;
+    for (let i=0; i<found.length; i++){
+      setStatus('loadStatus', `Word 파일 사진 불러오는 중… ${i}/${found.length}`);
+      try{
+        const ext = found[i].target.split('.').pop().toLowerCase();
+        const type = {png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', gif:'image/gif', webp:'image/webp'}[ext];
+        if (!type) { bad++; continue; }
+        const r = await toResized(new Blob([await found[i].file.async('uint8array')], {type}));
+        got.push({id:++uid, name:found[i].name, blob:r.blob, url:URL.createObjectURL(r.blob), w:r.w, h:r.h, file:f.name});
+      }catch(e){ bad++; }
+    }
+    items = got.concat(items);
+    if (titleLines[0]) $('t1').value = titleLines[0];
+    if (titleLines[1]) $('t2').value = titleLines.slice(1).join(' ');
+    $('fname').value = f.name.replace(/\.docx$/i, '');
+    render();
+    const msg = `${f.name}에서 사진 ${got.length}장과 이름을 불러왔습니다.` + (bad ? ` (읽지 못한 그림 ${bad}개 제외)` : '') + ' 이제 사진을 넣으면 뒤에 이어서 붙어요.';
+    setStatus('loadStatus', msg, bad ? 'warn' : 'ok');
+    return msg;
+  }catch(err){
+    console.warn('docx import', err);
+    setStatus('loadStatus', `${f.name}에서 사진을 찾지 못했습니다. 이 도구로 만든 검수 사진 Word 파일(.docx)인지 확인해 주세요. 한글(.hwp) 파일은 불러올 수 없어요.`, 'warn');
+    return '';
+  }
+}
+$('docxBtn').onclick = () => $('docxFile').click();
+$('docxFile').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) addFiles([f]); };
 
 /* ---------- preview ---------- */
 function setStatus(id, text, kind){ const el=$(id); el.textContent=text||''; el.className='status'+(kind?' '+kind:''); }
